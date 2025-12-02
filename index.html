@@ -64,7 +64,7 @@
         </div>
     </div>
     <textarea id="editor" spellcheck="false" oninput="parseAndRender()"></textarea>
-    <div id="status">拡張子 .mermaid で保存します</div>
+    <div id="status">座標なしノードは自動でずらして表示</div>
 </div>
 
 <div id="paper-container"></div>
@@ -84,28 +84,23 @@
         }
     });
 
-    const DEFAULT_TEXT = `ps1[process1] @(390, 50)
-ps2[process2] @(390, 190)
-ps3[process3] @(390, 330)
-data1[/data1/] @(110, 330)
-buf1[[buffer1]] @(260, 250)
-data2[/data2/] @(580, 190)
-data3[/data3/] @(610, 40)
+    const DEFAULT_TEXT = `// 座標指定がないノードは自動でずらして配置されます
+NodeA[新規ノードA]
+NodeB[新規ノードB]
+NodeC[新規ノードC]
+NodeD[新規ノードD]
 
+// 既存の座標付きノード
+Event[固定済み] @(300, 100)
 
-
-ps1 -.-> data1:l
-ps2 -.-> data1:l
-data1 -.-> ps3
-buf1:r <-.-> ps2
-buf1:r -.-> ps3
-ps3 -.-> data3:r
-ps3 -.-> data2:r
-data2 -.-> ps2
-data3 -.-> ps1`;
+NodeA --> NodeB
+NodeB --> NodeC
+NodeC --> NodeD
+NodeD --> Event`;
 
     window.onload = function() {
         initJointJS();
+        // 元のキー名に戻しました
         const saved = localStorage.getItem('mermaid-fixed-layout-editor'); 
         document.getElementById('editor').value = saved ? saved : DEFAULT_TEXT;
         parseAndRender();
@@ -206,8 +201,6 @@ data3 -.-> ps1`;
 
         lines.forEach(line => {
             let newLine = line;
-            
-            // 矢印（エッジ定義）が含まれる行は絶対に座標更新しない
             if (line.match(/[-=.]>/) || line.includes('---') || line.includes('<--')) {
                 newLines.push(newLine);
                 return;
@@ -228,14 +221,16 @@ data3 -.-> ps1`;
         });
         
         const newText = newLines.join('\n');
+        // 元のキー名に戻しました
         if (newText !== text) { editor.value = newText; localStorage.setItem('mermaid-fixed-layout-editor', newText); }
         isUpdatingText = false;
     }
 
-    // ■■■ 解析ロジック ■■■
+    // ■■■ 解析ロジック (自動分散配置) ■■■
     function parseAndRender() {
         if (isUpdatingText) return;
         const text = document.getElementById('editor').value;
+        // 元のキー名に戻しました
         localStorage.setItem('mermaid-fixed-layout-editor', text);
 
         const lines = text.split('\n');
@@ -243,6 +238,8 @@ data3 -.-> ps1`;
         const createdNodes = {};
         const selectedIds = selectedCells.map(c => c.id);
         clearSelection(); graph.clear();
+
+        let noCoordCount = 0; // 自動配置用カウンタ
 
         // 1. ノード解析
         lines.forEach(line => {
@@ -253,9 +250,19 @@ data3 -.-> ps1`;
             const idMatch = line.match(/^([^\s\[\(\<]+)/);
             if (!idMatch) return;
             const id = idMatch[1]; 
+            
+            // 座標抽出
             const posMatch = line.match(/@\((\d+),\s*(\d+)\)/);
-            const x = posMatch ? parseInt(posMatch[1]) : 0;
-            const y = posMatch ? parseInt(posMatch[2]) : 0;
+            let x, y;
+            if (posMatch) {
+                x = parseInt(posMatch[1]);
+                y = parseInt(posMatch[2]);
+            } else {
+                // 座標がない場合はずらす
+                x = 50 + (noCoordCount * 30);
+                y = 50 + (noCoordCount * 30);
+                noCoordCount++;
+            }
 
             let label = id;
             let type = 'rect';
@@ -394,13 +401,10 @@ data3 -.-> ps1`;
 
     function loadFile(input) { /* (略) */ const file = input.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = function(e) { document.getElementById('editor').value = e.target.result; parseAndRender(); }; reader.readAsText(file); input.value = ''; }
     
-    // ■■■ 修正: 拡張子とタイムスタンプ対応 ■■■
     function downloadFile() {
         const text = document.getElementById('editor').value;
         const blob = new Blob([text], { type: 'text/plain' });
         const a = document.createElement('a');
-        
-        // タイムスタンプ生成 (YYYYMMDD_HHmmss)
         const now = new Date();
         const yyyy = now.getFullYear();
         const mm = String(now.getMonth() + 1).padStart(2, '0');
@@ -409,9 +413,7 @@ data3 -.-> ps1`;
         const min = String(now.getMinutes()).padStart(2, '0');
         const ss = String(now.getSeconds()).padStart(2, '0');
         const timestamp = `${yyyy}${mm}${dd}_${hh}${min}${ss}`;
-
         a.href = URL.createObjectURL(blob);
-        // 拡張子を .mermaid に変更
         a.download = `diagram_${timestamp}.mermaid`;
         a.click();
     }
