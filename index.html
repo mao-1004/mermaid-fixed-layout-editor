@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Mermaid Fixed Layout Editor</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.4/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/backbone.js/1.4.1/backbone-min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.5/joint.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.5/joint.min.css" />
+
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; overflow: hidden; user-select: none; }
+        
+        #sidebar {
+            width: 400px; background: #2d2d2d; color: #ccc;
+            display: flex; flex-direction: column; border-right: 1px solid #444; z-index: 10;
+        }
+        #header { padding: 10px; background: #1e1e1e; border-bottom: 1px solid #444; }
+        .btn-group { display: flex; gap: 5px; margin-top: 5px; }
+        
+        button, .file-label {
+            background: #0e639c; color: white; border: none; padding: 5px 10px;
+            border-radius: 3px; cursor: pointer; font-size: 12px;
+        }
+        button:hover { background: #1177bb; }
+        input[type="file"] { display: none; }
+
+        #editor {
+            flex: 1; width: 100%; background: #252526; color: #d4d4d4;
+            border: none; padding: 10px; resize: none;
+            font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; line-height: 1.5;
+            outline: none; box-sizing: border-box;
+        }
+
+        #paper-container {
+            flex: 1; background-color: #f0f0f0; overflow: hidden; position: relative;
+            background-image: radial-gradient(#aaa 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        #status { font-size: 11px; color: #888; padding: 5px; text-align: right; background: #1e1e1e;}
+
+        #selection-box {
+            position: fixed; background-color: rgba(0, 122, 204, 0.2); border: 1px solid #007acc;
+            display: none; pointer-events: none; z-index: 9999;
+        }
+        .joint-element.selected rect,
+        .joint-element.selected circle,
+        .joint-element.selected polygon,
+        .joint-element.selected path {
+            stroke: #ff9900 !important; stroke-width: 3px !important; stroke-dasharray: 5 5;
+        }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div id="header">
+        <strong>Mermaid Fixed Layout Editor</strong>
+        <div class="btn-group">
+            <label class="file-label">📂 開く<input type="file" onchange="loadFile(this)"></label>
+            <button onclick="downloadFile()">💾 保存</button>
+            <button onclick="resetGraph()" style="background:#444">リセット</button>
+        </div>
+    </div>
+    <textarea id="editor" spellcheck="false" oninput="parseAndRender()"></textarea>
+    <div id="status">拡張子 .mermaid で保存します</div>
+</div>
+
+<div id="paper-container"></div>
+<div id="selection-box"></div>
+
+<script>
+    let graph;
+    let paper;
+    let isUpdatingText = false;
+    let selectedCells = []; 
+
+    // カスタムシェイプ
+    joint.shapes.standard.Path.define('examples.StoredData', {
+        attrs: {
+            body: { refD: 'M 10 0 L 100 0 C 90 33 90 66 100 100 L 10 100 C 0 66 0 33 10 0 Z', strokeWidth: 2, stroke: '#333333', fill: '#ffffff' },
+            label: { textVerticalAnchor: 'middle', textAnchor: 'middle', refX: '50%', refY: '50%', fontSize: 12, fill: '#333333' }
+        }
+    });
+
+    const DEFAULT_TEXT = `ps1[process1] @(390, 50)
+ps2[process2] @(390, 190)
+ps3[process3] @(390, 330)
+data1[/data1/] @(110, 330)
+buf1[[buffer1]] @(260, 250)
+data2[/data2/] @(580, 190)
+data3[/data3/] @(610, 40)
+
+
+
+ps1 -.-> data1:l
+ps2 -.-> data1:l
+data1 -.-> ps3
+buf1:r <-.-> ps2
+buf1:r -.-> ps3
+ps3 -.-> data3:r
+ps3 -.-> data2:r
+data2 -.-> ps2
+data3 -.-> ps1`;
+
+    window.onload = function() {
+        initJointJS();
+        const saved = localStorage.getItem('mermaid-fixed-layout-editor'); 
+        document.getElementById('editor').value = saved ? saved : DEFAULT_TEXT;
+        parseAndRender();
+        setupSelectionLogic();
+    };
+
+    function initJointJS() {
+        graph = new joint.dia.Graph();
+        paper = new joint.dia.Paper({
+            el: document.getElementById('paper-container'),
+            model: graph,
+            width: 3000, height: 3000, gridSize: 10, drawGrid: false,
+            background: { color: 'transparent' },
+            interactive: { linkMove: false }
+        });
+    }
+
+    function setupSelectionLogic() {
+        const selectionBox = document.getElementById('selection-box');
+        let startPoint = null;
+
+        paper.on('element:pointerdown', function(elementView, evt) {
+            const cell = elementView.model;
+            if (!evt.shiftKey && !evt.ctrlKey && !selectedCells.includes(cell)) {
+                clearSelection(); addToSelection(cell);
+            } else if (evt.shiftKey || evt.ctrlKey) {
+                if (selectedCells.includes(cell)) removeFromSelection(cell); else addToSelection(cell);
+            } else {
+                if (!selectedCells.includes(cell)) addToSelection(cell);
+            }
+        });
+
+        graph.on('change:position', function(cell, newPos, options) {
+            if (!options.ui) return; 
+            if (!selectedCells.includes(cell)) return;
+            const dx = newPos.x - (cell.previous('position').x || 0);
+            const dy = newPos.y - (cell.previous('position').y || 0);
+            selectedCells.forEach(peer => { if (peer.id !== cell.id) peer.translate(dx, dy); });
+        });
+
+        paper.on('element:pointerup', function(elementView) {
+            const cell = elementView.model;
+            if (selectedCells.includes(cell)) {
+                const updates = {};
+                selectedCells.forEach(c => { const p = c.position(); updates[c.id] = { x: Math.round(p.x), y: Math.round(p.y) }; });
+                updateBatchCoordinates(updates);
+            }
+        });
+
+        paper.on('blank:pointerdown', function(evt, x, y) {
+            if (!evt.shiftKey && !evt.ctrlKey) clearSelection();
+            startPoint = { x: evt.clientX, y: evt.clientY };
+            selectionBox.style.left = startPoint.x + 'px'; selectionBox.style.top = startPoint.y + 'px';
+            selectionBox.style.width = '0px'; selectionBox.style.height = '0px';
+            selectionBox.style.display = 'block';
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
+
+        function onMouseMove(evt) {
+            if (!startPoint) return;
+            const currentX = evt.clientX; const currentY = evt.clientY;
+            const left = Math.min(startPoint.x, currentX); const top = Math.min(startPoint.y, currentY);
+            const w = Math.abs(startPoint.x - currentX); const h = Math.abs(startPoint.y - currentY);
+            selectionBox.style.left = left + 'px'; selectionBox.style.top = top + 'px';
+            selectionBox.style.width = w + 'px'; selectionBox.style.height = h + 'px';
+        }
+
+        function onMouseUp(evt) {
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+            selectionBox.style.display = 'none';
+            if (!startPoint) return;
+            const p0 = paper.clientToLocalPoint({ x: startPoint.x, y: startPoint.y });
+            const p1 = paper.clientToLocalPoint({ x: evt.clientX, y: evt.clientY });
+            const rect = { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), width: Math.abs(p0.x - p1.x), height: Math.abs(p0.y - p1.y) };
+            if (rect.width > 5 || rect.height > 5) {
+                const found = graph.findModelsInArea(rect);
+                found.forEach(cell => { if (cell.isElement()) addToSelection(cell); });
+            }
+            startPoint = null;
+        }
+    }
+    function addToSelection(cell) { if (!selectedCells.includes(cell)) { selectedCells.push(cell); const view = cell.findView(paper); if (view) view.el.classList.add('selected'); } }
+    function removeFromSelection(cell) { selectedCells = selectedCells.filter(c => c.id !== cell.id); const view = cell.findView(paper); if (view) view.el.classList.remove('selected'); }
+    function clearSelection() { selectedCells.forEach(cell => { const view = cell.findView(paper); if (view) view.el.classList.remove('selected'); }); selectedCells = []; }
+
+    function updateTextCoordinates(id, x, y) {
+        updateBatchCoordinates({ [id]: { x, y } });
+    }
+
+    function updateBatchCoordinates(updates) {
+        isUpdatingText = true;
+        const editor = document.getElementById('editor');
+        let text = editor.value;
+        let lines = text.split('\n');
+        let newLines = [];
+
+        lines.forEach(line => {
+            let newLine = line;
+            
+            // 矢印（エッジ定義）が含まれる行は絶対に座標更新しない
+            if (line.match(/[-=.]>/) || line.includes('---') || line.includes('<--')) {
+                newLines.push(newLine);
+                return;
+            }
+
+            const idMatch = line.match(/^([^\s\[\(\<]+)/);
+            if (idMatch) {
+                const rawId = idMatch[1];
+                const id = rawId.split(':')[0]; 
+                if (updates[id]) {
+                    const { x, y } = updates[id];
+                    const regex = new RegExp(`(@\\(\\d+,\\s*\\d+\\))`);
+                    if (regex.test(newLine)) newLine = newLine.replace(regex, `@(${x}, ${y})`);
+                    else newLine += ` @(${x}, ${y})`;
+                }
+            }
+            newLines.push(newLine);
+        });
+        
+        const newText = newLines.join('\n');
+        if (newText !== text) { editor.value = newText; localStorage.setItem('mermaid-fixed-layout-editor', newText); }
+        isUpdatingText = false;
+    }
+
+    // ■■■ 解析ロジック ■■■
+    function parseAndRender() {
+        if (isUpdatingText) return;
+        const text = document.getElementById('editor').value;
+        localStorage.setItem('mermaid-fixed-layout-editor', text);
+
+        const lines = text.split('\n');
+        const cells = []; 
+        const createdNodes = {};
+        const selectedIds = selectedCells.map(c => c.id);
+        clearSelection(); graph.clear();
+
+        // 1. ノード解析
+        lines.forEach(line => {
+            line = line.trim();
+            if (!line || line.startsWith('//') || line.startsWith('%%')) return;
+            if (line.match(/[-=.]>/) || line.includes('---') || line.includes('<--')) return;
+
+            const idMatch = line.match(/^([^\s\[\(\<]+)/);
+            if (!idMatch) return;
+            const id = idMatch[1]; 
+            const posMatch = line.match(/@\((\d+),\s*(\d+)\)/);
+            const x = posMatch ? parseInt(posMatch[1]) : 0;
+            const y = posMatch ? parseInt(posMatch[2]) : 0;
+
+            let label = id;
+            let type = 'rect';
+
+            if (line.match(id + '\\[\\((.*?)\\)\\]')) { type = 'cyl'; label = line.match(id + '\\[\\((.*?)\\)\\]')[1]; }
+            else if (line.match(id + '\\[\\[(.*?)\\]\\]')) { type = 'stored'; label = line.match(id + '\\[\\[(.*?)\\]\\]')[1]; }
+            else if (line.match(id + '\\(\\((.*?)\\)\\)')) { type = 'circle'; label = line.match(id + '\\(\\((.*?)\\)\\)')[1]; }
+            else if (line.match(id + '\\{\\{(.*?)\\}\\}')) { type = 'hexagon'; label = line.match(id + '\\{\\{(.*?)\\}\\}')[1]; }
+            else if (line.match(id + '\\[\\/(.*?)\\/\\]')) { type = 'parallelogram'; label = line.match(id + '\\[\\/(.*?)\\/\\]')[1]; }
+            else if (line.match(id + '\\>(.*?)\\]')) { type = 'doc'; label = line.match(id + '\\>(.*?)\\]')[1]; }
+            else if (line.match(id + '\\{(.*?)\\}')) { type = 'rhombus'; label = line.match(id + '\\{(.*?)\\}')[1]; }
+            else if (line.match(id + '\\((.*?)\\)')) { type = 'round'; label = line.match(id + '\\((.*?)\\)')[1]; }
+            else if (line.match(id + '\\[(.*?)\\]')) { type = 'rect'; label = line.match(id + '\\[(.*?)\\]')[1]; }
+
+            let cell;
+            if (type === 'cyl') {
+                cell = new joint.shapes.standard.Cylinder(); cell.resize(100, 60);
+                cell.attr({ body: { fill: '#f9f9ff', stroke: '#333' }, top: { fill: '#f9f9ff', stroke: '#333' }, label: { text: label, fill: '#333', fontSize: 12, refY: '50%', textVerticalAnchor: 'middle' } });
+            } else if (type === 'stored') { cell = new joint.shapes.examples.StoredData(); cell.resize(110, 60); cell.attr('label/text', label);
+            } else if (type === 'parallelogram') { cell = new joint.shapes.standard.Polygon(); cell.resize(120, 60); cell.attr('body/refPoints', '20,0 100,0 80,100 0,100'); cell.attr('label/text', label);
+            } else if (type === 'circle') { cell = new joint.shapes.standard.Circle(); cell.resize(60, 60); cell.attr('label/text', label);
+            } else if (type === 'rhombus') { cell = new joint.shapes.standard.Polygon(); cell.resize(100, 60); cell.attr('body/refPoints', '50,0 100,50 50,100 0,50'); cell.attr('label/text', label);
+            } else if (type === 'doc') { cell = new joint.shapes.standard.Path(); cell.resize(100, 60); cell.attr('body/refD', 'M 0 0 L 100 0 L 100 80 Q 50 100 0 80 Z'); cell.attr('label/text', label);
+            } else if (type === 'hexagon') { cell = new joint.shapes.standard.Polygon(); cell.resize(100, 60); cell.attr('body/refPoints', '15,0 85,0 100,50 85,100 15,100 0,50'); cell.attr('label/text', label);
+            } else { cell = new joint.shapes.standard.Rectangle(); cell.resize(120, 50); if (type === 'round') cell.attr('body/rx', 10); cell.attr('label/text', label); }
+
+            cell.position(x, y); cell.set('id', id);
+            const textWidth = label.length * 14; 
+            if (textWidth > cell.size().width) cell.resize(textWidth + 30, cell.size().height);
+            cells.push(cell); createdNodes[id] = cell;
+        });
+
+        // 2. エッジ生成
+        const linksData = [];
+        const portUsage = {}; 
+
+        const parseIdInfo = (rawStr) => {
+            if (!rawStr) return { id: '', hasDir: false };
+            const parts = rawStr.split(':');
+            const id = parts[0];
+            if (parts.length < 2 || !parts[1]) return { id, hasDir: false };
+
+            const dir = parts[1].toLowerCase();
+            let anchorName = 'center'; let direction = null; let hasDir = false;
+
+            if (['top', 't', 'bottom', 'b', 'left', 'l', 'right', 'r'].includes(dir)) {
+                hasDir = true;
+                if (dir.startsWith('t')) { anchorName = 'top'; direction = 'top'; }
+                else if (dir.startsWith('b')) { anchorName = 'bottom'; direction = 'bottom'; }
+                else if (dir.startsWith('l')) { anchorName = 'left'; direction = 'left'; }
+                else if (dir.startsWith('r')) { anchorName = 'right'; direction = 'right'; }
+            }
+            return { id, anchorName, direction, hasDir };
+        };
+
+        lines.forEach(line => {
+            const edgeRegex = /^(.+?)\s+((?:<)?[-=.]{2,}(?:>)?|---)\s+([^\s]+)/; 
+            const match = line.match(edgeRegex);
+            if (!match) return;
+
+            const srcInfo = parseIdInfo(match[1].trim());
+            const tgtInfo = parseIdInfo(match[3].trim());
+            const arrowStr = match[2];
+
+            if (createdNodes[srcInfo.id] && createdNodes[tgtInfo.id]) {
+                const linkData = { srcInfo, tgtInfo, arrowStr };
+                linksData.push(linkData);
+
+                if (srcInfo.hasDir) {
+                    const key = `${srcInfo.id}:${srcInfo.anchorName}`;
+                    if (!portUsage[key]) portUsage[key] = [];
+                    portUsage[key].push({ side: 'source', data: linkData });
+                }
+                if (tgtInfo.hasDir) {
+                    const key = `${tgtInfo.id}:${tgtInfo.anchorName}`;
+                    if (!portUsage[key]) portUsage[key] = [];
+                    portUsage[key].push({ side: 'target', data: linkData });
+                }
+            }
+        });
+
+        // 3. エッジ描画
+        const GAP = 15; 
+
+        linksData.forEach(linkData => {
+            const link = new joint.shapes.standard.Link({
+                source: { id: linkData.srcInfo.id },
+                target: { id: linkData.tgtInfo.id },
+                router: { name: 'manhattan', args: {} }, 
+                connector: { name: 'rounded' }
+            });
+
+            const src = linkData.srcInfo;
+            if (src.hasDir) {
+                const key = `${src.id}:${src.anchorName}`;
+                const usage = portUsage[key];
+                const index = usage.findIndex(u => u.side === 'source' && u.data === linkData);
+                const count = usage.length;
+                const offset = (index - (count - 1) / 2) * GAP;
+                const anchorArgs = {};
+                if (src.anchorName === 'top' || src.anchorName === 'bottom') anchorArgs.dx = offset; else anchorArgs.dy = offset;
+                link.source({ id: src.id, anchor: { name: src.anchorName, args: anchorArgs }, connectionPoint: { name: 'boundary' } });
+                link.router('manhattan', { startDirections: [src.direction], padding: 20 });
+            }
+
+            const tgt = linkData.tgtInfo;
+            if (tgt.hasDir) {
+                const key = `${tgt.id}:${tgt.anchorName}`;
+                const usage = portUsage[key];
+                const index = usage.findIndex(u => u.side === 'target' && u.data === linkData);
+                const count = usage.length;
+                const offset = (index - (count - 1) / 2) * GAP;
+                const anchorArgs = {};
+                if (tgt.anchorName === 'top' || tgt.anchorName === 'bottom') anchorArgs.dx = offset; else anchorArgs.dy = offset;
+                link.target({ id: tgt.id, anchor: { name: tgt.anchorName, args: anchorArgs }, connectionPoint: { name: 'boundary' } });
+                
+                const currentRouterArgs = link.get('router').args || {};
+                currentRouterArgs.endDirections = [tgt.direction];
+                currentRouterArgs.padding = 20; 
+                link.router('manhattan', currentRouterArgs);
+            }
+            
+            link.attr('line/stroke', '#333'); link.attr('line/strokeWidth', 2);
+            const arrowStr = linkData.arrowStr;
+            if (arrowStr.startsWith('<')) link.attr('line/sourceMarker', { type: 'path', d: 'M 10 -5 0 0 10 5 z' }); else link.attr('line/sourceMarker', { type: 'none' });
+            if (arrowStr.endsWith('>')) link.attr('line/targetMarker', { type: 'path', d: 'M 10 -5 0 0 10 5 z' }); else link.attr('line/targetMarker', { type: 'none' });
+            if (arrowStr.includes('-.') || arrowStr.includes('.-')) link.attr('line/strokeDasharray', '5 5');
+            else if (arrowStr.includes('==')) link.attr('line/strokeWidth', 4);
+
+            cells.push(link);
+        });
+
+        graph.addCells(cells);
+        selectedIds.forEach(id => { const cell = graph.getCell(id); if (cell) addToSelection(cell); });
+    }
+
+    function loadFile(input) { /* (略) */ const file = input.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = function(e) { document.getElementById('editor').value = e.target.result; parseAndRender(); }; reader.readAsText(file); input.value = ''; }
+    
+    // ■■■ 修正: 拡張子とタイムスタンプ対応 ■■■
+    function downloadFile() {
+        const text = document.getElementById('editor').value;
+        const blob = new Blob([text], { type: 'text/plain' });
+        const a = document.createElement('a');
+        
+        // タイムスタンプ生成 (YYYYMMDD_HHmmss)
+        const now = new Date();
+        const yyyy = now.getFullYear();
+        const mm = String(now.getMonth() + 1).padStart(2, '0');
+        const dd = String(now.getDate()).padStart(2, '0');
+        const hh = String(now.getHours()).padStart(2, '0');
+        const min = String(now.getMinutes()).padStart(2, '0');
+        const ss = String(now.getSeconds()).padStart(2, '0');
+        const timestamp = `${yyyy}${mm}${dd}_${hh}${min}${ss}`;
+
+        a.href = URL.createObjectURL(blob);
+        // 拡張子を .mermaid に変更
+        a.download = `diagram_${timestamp}.mermaid`;
+        a.click();
+    }
+    
+    function resetGraph() { document.getElementById('editor').value = DEFAULT_TEXT; parseAndRender(); }
+</script>
+
+</body>
+</html>
