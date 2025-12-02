@@ -64,7 +64,7 @@
         </div>
     </div>
     <textarea id="editor" spellcheck="false" oninput="parseAndRender()"></textarea>
-    <div id="status">座標なしノードは自動でずらして表示</div>
+    <div id="status">拡張子 .mermaid で保存します</div>
 </div>
 
 <div id="paper-container"></div>
@@ -84,23 +84,28 @@
         }
     });
 
-    const DEFAULT_TEXT = `// 座標指定がないノードは自動でずらして配置されます
-NodeA[新規ノードA]
-NodeB[新規ノードB]
-NodeC[新規ノードC]
-NodeD[新規ノードD]
+    const DEFAULT_TEXT = `ps1[process1] @(390, 50)
+ps2[process2] @(390, 190)
+ps3[process3] @(390, 330)
+data1[/data1/] @(110, 330)
+buf1[[buffer1]] @(260, 250)
+data2[/data2/] @(580, 190)
+data3[/data3/] @(610, 40)
 
-// 既存の座標付きノード
-Event[固定済み] @(300, 100)
 
-NodeA --> NodeB
-NodeB --> NodeC
-NodeC --> NodeD
-NodeD --> Event`;
+
+ps1 -.-> data1:l
+ps2 -.-> data1:l
+data1 -.-> ps3
+buf1:r <-.-> ps2
+buf1:r -.-> ps3
+ps3 -.-> data3:r
+ps3 -.-> data2:r
+data2 -.-> ps2
+data3 -.-> ps1`;
 
     window.onload = function() {
         initJointJS();
-        // 元のキー名に戻しました
         const saved = localStorage.getItem('mermaid-fixed-layout-editor'); 
         document.getElementById('editor').value = saved ? saved : DEFAULT_TEXT;
         parseAndRender();
@@ -201,6 +206,8 @@ NodeD --> Event`;
 
         lines.forEach(line => {
             let newLine = line;
+            
+            // 矢印（エッジ定義）が含まれる行は絶対に座標更新しない
             if (line.match(/[-=.]>/) || line.includes('---') || line.includes('<--')) {
                 newLines.push(newLine);
                 return;
@@ -221,7 +228,6 @@ NodeD --> Event`;
         });
         
         const newText = newLines.join('\n');
-        // 元のキー名に戻しました
         if (newText !== text) { editor.value = newText; localStorage.setItem('mermaid-fixed-layout-editor', newText); }
         isUpdatingText = false;
     }
@@ -230,7 +236,6 @@ NodeD --> Event`;
     function parseAndRender() {
         if (isUpdatingText) return;
         const text = document.getElementById('editor').value;
-        // 元のキー名に戻しました
         localStorage.setItem('mermaid-fixed-layout-editor', text);
 
         const lines = text.split('\n');
